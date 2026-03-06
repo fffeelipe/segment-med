@@ -1,0 +1,284 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{float}
+
+\geometry{margin=2.5cm}
+
+\title{Comparative Study of Deep Learning Architectures for\\ Atypical Lipomatous Tumor Segmentation in MRI}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+Atypical lipomatous tumors (ALTs) are low-grade soft tissue neoplasms that pose diagnostic and therapeutic challenges in clinical practice. Accurate delineation of tumor boundaries from MRI is essential for treatment planning and follow-up assessment. This report presents a comparative evaluation of four deep learning-based segmentation approaches applied to ALT segmentation from T1- and T2-weighted MRI sequences.
+
+We evaluate two architectural families---the encoder--decoder U-Net with a pretrained backbone (via \texttt{segmentation\_models\_pytorch}, SMP) and the nnU-Net-style PlainConvUNet---each in two input configurations: standard 2D (single slice) and 2.5D (three consecutive slices stacked as channels). All models are trained with 5-fold patient-level cross-validation and assessed on a held-out test set.
+
+% ============================================================
+\section{Methods}
+% ============================================================
+
+\subsection{Dataset and Preprocessing}
+
+MRI volumes (T1 and T2) were converted to 2D axial slices. Expert-annotated binary masks delineate the tumor region. A patient-level split reserves a held-out test set; the remaining patients are partitioned into 5 folds for cross-validation. All images are resized to $256 \times 256$ pixels.
+
+A \texttt{slice\_tumor\_map} flags slices containing tumor. During training, \emph{progressive negative sampling} linearly ramps the fraction of tumor-free (negative) slices from 0 to $\text{NEG\_SAMPLE\_RATIO} = 0.5$ across epochs, mitigating class imbalance while gradually introducing harder examples.
+
+Data augmentation (training only) includes horizontal/vertical flips, rotations, elastic transforms, brightness/contrast jitter, and coarse dropout via the \texttt{Albumentations} library. For 2.5D models, each input is a 3-channel stack of the previous, current, and next axial slice, normalized with ImageNet statistics.
+
+\subsection{Model Architectures}
+
+Table~\ref{tab:architectures} summarizes the four approaches.
+
+\begin{table}[H]
+\centering
+\caption{Model architecture summary.}
+\label{tab:architectures}
+\begin{tabular}{lllcc}
+\toprule
+\textbf{ID} & \textbf{Architecture} & \textbf{Encoder / Config} & \textbf{Input Ch.} & \textbf{Params} \\
+\midrule
+M1 & SMP U-Net 2D     & EfficientNet-B4 (ImageNet) + scSE decoder & 1 & 20.3\,M \\
+M2 & SMP U-Net 2.5D   & EfficientNet-B4 (ImageNet) + scSE decoder & 3 & 20.3\,M \\
+M3 & nnU-Net 2D       & PlainConvUNet, 7 stages, deep supervision  & 1 & 29.5\,M \\
+M4 & nnU-Net 2.5D     & PlainConvUNet, 7 stages, deep supervision  & 3 & $\sim$29.5\,M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{SMP U-Net (M1, M2).}
+Built with \texttt{segmentation\_models\_pytorch}. The encoder is an EfficientNet-B4 pretrained on ImageNet. The decoder uses spatial and channel squeeze-and-excitation (scSE) attention. Transfer learning is employed: the encoder is frozen for the first 5 epochs, then unfrozen with a 10$\times$ reduced learning rate for fine-tuning.
+
+\paragraph{nnU-Net PlainConvUNet (M3, M4).}
+Uses the \texttt{dynamic\_network\_architectures} implementation of the nnU-Net plain convolutional U-Net. The network has 7 stages with feature maps $[32, 64, 128, 256, 320, 512, 720]$, 2 convolutions per stage, and stride-2 downsampling. Deep supervision is enabled with geometrically decaying weights across resolution levels. Unlike M1/M2, no pretrained weights are used---the model is trained from scratch.
+
+\subsection{Training Protocol}
+
+All models share the following training configuration:
+
+\begin{itemize}
+    \item \textbf{Optimizer:} AdamW, initial learning rate $3 \times 10^{-4}$
+    \item \textbf{Scheduler:} Warmup cosine annealing (3 warmup epochs, 50 total epochs)
+    \item \textbf{Batch size:} 8
+    \item \textbf{Loss:} Combined loss = $0.8 \cdot \mathcal{L}_\text{Dice} + 0.15 \cdot \mathcal{L}_\text{Focal} + 0.05 \cdot \mathcal{L}_\text{Boundary}$
+    \item \textbf{Early stopping:} Patience of 10 epochs on validation Dice
+    \item \textbf{Gradient clipping:} Max norm 1.0
+    \item \textbf{Mixed precision:} Enabled on CUDA
+    \item \textbf{Cross-validation:} 5-fold, patient-level splits
+\end{itemize}
+
+\subsection{Inference Enhancements}
+
+At test time, two optional enhancements are evaluated:
+\begin{itemize}
+    \item \textbf{Test-Time Augmentation (TTA):} The input is passed through the model in four orientations (original, horizontal flip, vertical flip, both flips). The resulting logits are averaged before applying sigmoid activation.
+    \item \textbf{Post-Processing (PP):} Morphological operations and connected-component filtering to remove small spurious predictions.
+\end{itemize}
+
+\subsection{Evaluation Metric}
+
+The primary metric is the \textbf{Dice Similarity Coefficient (DSC)}, defined as:
+\[
+\text{DSC} = \frac{2 |P \cap G|}{|P| + |G|}
+\]
+where $P$ is the predicted segmentation and $G$ is the ground truth.
+
+% ============================================================
+\section{Results}
+% ============================================================
+
+\subsection{Best Validation Dice per Fold}
+
+Table~\ref{tab:val_dice} reports the best validation Dice achieved in each fold during training.
+
+\begin{table}[H]
+\centering
+\caption{Best validation Dice per fold and cross-validation summary.}
+\label{tab:val_dice}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Model} & \textbf{Fold 1} & \textbf{Fold 2} & \textbf{Fold 3} & \textbf{Fold 4} & \textbf{Fold 5} & \textbf{Mean} & \textbf{Std} \\
+\midrule
+M1: SMP U-Net 2D    & 0.6625 & 0.6851 & 0.7211 & \textbf{0.8552} & 0.7473 & 0.7342 & 0.0671 \\
+M2: SMP U-Net 2.5D  & 0.6246 & 0.6166 & 0.7354 & 0.8305 & 0.7663 & 0.7147 & 0.0828 \\
+M3: nnU-Net 2D      & 0.6631 & 0.6935 & 0.6249 & 0.8301 & 0.5802 & 0.6784 & 0.0848 \\
+M4: nnU-Net 2.5D    & 0.4546 & 0.6772 & 0.6606 & 0.7476 & 0.5525 & 0.6185 & 0.1031 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Best validation loss per fold.}
+\label{tab:val_loss}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Model} & \textbf{Fold 1} & \textbf{Fold 2} & \textbf{Fold 3} & \textbf{Fold 4} & \textbf{Fold 5} & \textbf{Mean} & \textbf{Std} \\
+\midrule
+M1: SMP U-Net 2D    & 0.5469 & 0.5317 & 0.3725 & \textbf{0.4305} & 0.3981 & 0.4559 & 0.0707 \\
+M2: SMP U-Net 2.5D  & 0.5632 & 0.5400 & 0.3343 & 0.4706 & 0.3928 & 0.4602 & 0.0866 \\
+M3: nnU-Net 2D      & 0.5921 & 0.5447 & 0.4041 & 0.4735 & 0.4591 & 0.4947 & 0.0662 \\
+M4: nnU-Net 2.5D    & 0.6415 & 0.5824 & 0.3912 & 0.5308 & 0.4621 & 0.5216 & 0.0880 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Observations.}
+Across all models, Fold~4 consistently achieves the highest validation Dice (0.75--0.86), suggesting that particular patient partition is more favorable. M1 (SMP U-Net 2D) achieves the highest mean validation Dice at $0.7342 \pm 0.0671$, followed by M2 (SMP U-Net 2.5D) at $0.7147 \pm 0.0828$. M3 (nnU-Net 2D) follows at $0.6784 \pm 0.0848$, while M4 (nnU-Net 2.5D) ranks last at $0.6185 \pm 0.1031$---the lowest mean and highest variance of all models, indicating that combining 2.5D input with training from scratch is particularly challenging.
+
+\subsection{Test Set Evaluation}
+
+Table~\ref{tab:test_dice} reports test Dice for each fold's best model, both without and with TTA + post-processing.
+
+\begin{table}[H]
+\centering
+\caption{Test Dice per fold --- without and with TTA + post-processing (TTA+PP).}
+\label{tab:test_dice}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Fold 1} & \textbf{Fold 2} & \textbf{Fold 3} & \textbf{Fold 4} & \textbf{Fold 5} & \textbf{Mean} \\
+\midrule
+\multicolumn{7}{l}{\textit{Without TTA+PP}} \\
+\midrule
+M1: SMP U-Net 2D    & \textbf{0.8060} & 0.7241 & 0.7781 & 0.6979 & 0.6683 & 0.7349 \\
+M2: SMP U-Net 2.5D  & 0.7274 & 0.7578 & 0.6997 & 0.7123 & 0.6323 & 0.7059 \\
+M3: nnU-Net 2D      & 0.7783 & 0.7650 & 0.5983 & 0.7669 & 0.5803 & 0.6978 \\
+M4: nnU-Net 2.5D    & 0.6480 & 0.7501 & 0.6599 & 0.6656 & 0.7032 & 0.6854 \\
+\midrule
+\multicolumn{7}{l}{\textit{With TTA+PP}} \\
+\midrule
+M1: SMP U-Net 2D    & 0.8212 & 0.7800 & 0.8056 & \textbf{0.8362} & 0.7284 & \textbf{0.7943} \\
+M2: SMP U-Net 2.5D  & 0.7782 & 0.7836 & 0.8049 & 0.7523 & 0.7033 & 0.7645 \\
+M3: nnU-Net 2D      & 0.8066 & 0.8238 & 0.6810 & 0.8233 & 0.6305 & 0.7530 \\
+M4: nnU-Net 2.5D    & 0.7793 & 0.7914 & 0.7413 & 0.7923 & 0.6559 & 0.7520 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Reproducibility: SMP U-Net 2.5D Second Run}
+
+The SMP U-Net 2.5D model (M2) was trained a second time to assess reproducibility. Table~\ref{tab:m2_runs} compares both runs.
+
+\begin{table}[H]
+\centering
+\caption{SMP U-Net 2.5D (M2): comparison of two independent training runs.}
+\label{tab:m2_runs}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{Validation Dice}} & \multicolumn{2}{c}{\textbf{Test Dice (TTA+PP)}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+\textbf{Fold} & \textbf{Run 1} & \textbf{Run 2} & \textbf{Run 1} & \textbf{Run 2} \\
+\midrule
+Fold 1 & 0.6246 & 0.6404 & 0.7782 & 0.7484 \\
+Fold 2 & 0.6166 & 0.7052 & 0.7836 & 0.6998 \\
+Fold 3 & 0.7354 & 0.7520 & 0.8049 & 0.7189 \\
+Fold 4 & 0.8305 & 0.8569 & 0.7523 & 0.5909 \\
+Fold 5 & 0.7663 & 0.7875 & 0.7033 & 0.5145 \\
+\midrule
+Mean $\pm$ Std & $0.7147 \pm 0.083$ & $0.7484 \pm 0.073$ & $0.7645$ & $0.6545$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Run~2 achieves marginally higher validation Dice ($0.7484$ vs.\ $0.7147$) but substantially worse test Dice ($0.6545$ vs.\ $0.7645$). This gap suggests potential overfitting in Run~2, where higher validation performance does not generalize to unseen test data. The discrepancy highlights the importance of evaluating on a truly held-out set rather than relying solely on cross-validation metrics.
+
+\subsection{Summary Comparison}
+
+Table~\ref{tab:summary} presents the aggregated performance metrics.
+
+\begin{table}[H]
+\centering
+\caption{Overall comparison of all approaches (completed models).}
+\label{tab:summary}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Val Dice (mean $\pm$ std)} & \textbf{Test Dice} & \textbf{Test Dice (TTA+PP)} \\
+\midrule
+M1: SMP U-Net 2D     & $0.7342 \pm 0.0671$ & 0.7349 & \textbf{0.7943} \\
+M2: SMP U-Net 2.5D   & $0.7147 \pm 0.0828$ & 0.7059 & 0.7645 \\
+M3: nnU-Net 2D       & $0.6784 \pm 0.0848$ & 0.6978 & 0.7530 \\
+M4: nnU-Net 2.5D     & $0.6185 \pm 0.1031$ & 0.6854 & 0.7520 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Discussion}
+% ============================================================
+
+\subsection{SMP U-Net vs.\ nnU-Net}
+
+The SMP U-Net models (M1, M2) consistently outperform the nnU-Net models (M3) in both validation and test Dice. This advantage is attributable to:
+\begin{enumerate}
+    \item \textbf{Pretrained encoder:} EfficientNet-B4 weights from ImageNet provide strong low- and mid-level features, enabling faster convergence and better generalization on small medical datasets.
+    \item \textbf{scSE attention:} The spatial and channel squeeze-and-excitation blocks in the decoder help recalibrate feature maps, improving boundary precision.
+    \item \textbf{Encoder freezing strategy:} Freezing the encoder initially prevents catastrophic forgetting of pretrained features, while gradual unfreezing allows domain-specific fine-tuning.
+\end{enumerate}
+
+The nnU-Net models, despite having 45\% more parameters (29.5M vs.\ 20.3M), must learn all features from scratch on a relatively small dataset. Deep supervision helps gradient flow but does not fully compensate for the lack of pretrained features. M4 (nnU-Net 2.5D) in particular exhibits the worst validation Dice ($0.6185 \pm 0.1031$) with the highest variance, though its test performance with TTA+PP (0.7520) nearly matches M3 (0.7530), suggesting that post-processing can partially compensate for weaker learned representations.
+
+\subsection{2D vs.\ 2.5D Input}
+
+Counter to expectations, the 2.5D variants do not improve over their 2D counterparts:
+\begin{itemize}
+    \item M1 (2D) outperforms M2 (2.5D) by $+0.030$ in test Dice with TTA+PP ($0.7943$ vs.\ $0.7645$).
+    \item M3 (2D) and M4 (2.5D) achieve nearly identical test Dice with TTA+PP ($0.7530$ vs.\ $0.7520$), but M3 has substantially better validation Dice ($0.6784$ vs.\ $0.6185$), suggesting more stable training.
+\end{itemize}
+
+Possible explanations include:
+\begin{itemize}
+    \item The inter-slice spacing may be too large for adjacent slices to provide useful contextual information.
+    \item The 2.5D approach triples the effective input dimensionality without adding proportional spatial coherence, potentially diluting informative features with noise from adjacent slices that may not contain tumor.
+    \item With a small dataset, the 2.5D approach may introduce additional variance that hinders generalization.
+\end{itemize}
+
+\subsection{Impact of TTA and Post-Processing}
+
+TTA + post-processing consistently improves test Dice across all models:
+\begin{itemize}
+    \item M1: $+0.059$ ($0.7349 \to 0.7943$)
+    \item M2: $+0.059$ ($0.7059 \to 0.7645$)
+    \item M3: $+0.055$ ($0.6978 \to 0.7530$)
+    \item M4: $+0.067$ ($0.6854 \to 0.7520$)
+\end{itemize}
+
+The improvement ranges from 5.5 to 6.7 percentage points across all models, confirming that TTA+PP is architecture-agnostic and should be adopted as standard practice. Notably, M4 benefits the most from TTA+PP, likely because its weaker base predictions have more room for improvement through augmentation-based ensembling.
+
+\subsection{Fold Variance and Generalization}
+
+A notable observation is the high variance across folds. Fold~4 consistently achieves the best validation Dice (0.83--0.86) across all models, while Fold~5 tends to perform worst. This likely reflects the heterogeneity of the patient population and the small dataset size, where particular patient combinations can strongly influence fold-level metrics.
+
+The M2 reproducibility experiment further underscores this: despite random seed control via \texttt{KFold(random\_state=42)}, stochastic training dynamics produce meaningfully different test outcomes between runs.
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+Among the four evaluated approaches, \textbf{M1 (SMP U-Net 2D)} with test-time augmentation and post-processing achieves the best overall performance with a mean test Dice of \textbf{0.7943}. Key findings:
+
+\begin{enumerate}
+    \item \textbf{Pretrained encoders matter:} SMP U-Net with ImageNet-pretrained EfficientNet-B4 outperforms the nnU-Net trained from scratch, despite the latter having more parameters and deep supervision.
+    \item \textbf{2.5D input does not help:} Stacking adjacent slices as channels does not improve segmentation quality in this setting, possibly due to inter-slice spacing or dataset size limitations.
+    \item \textbf{TTA+PP is essential:} Test-time augmentation with post-processing provides a consistent $\sim$6\% Dice improvement at no training cost.
+    \item \textbf{Small dataset challenges:} High fold-level variance and the reproducibility gap in M2 highlight the need for larger datasets or more robust regularization strategies.
+\end{enumerate}
+
+Future work should investigate (i) 3D volumetric architectures for true spatial context, (ii) self-supervised or foundation model pretraining on medical data, (iii) ensemble strategies combining the best fold models, and (iv) larger or multi-institutional datasets to reduce fold-level variance.
+
+\end{document}
